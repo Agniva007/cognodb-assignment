@@ -53,6 +53,17 @@ class DashboardController extends Controller {
     );
   }
 
+  async maintainerClusters(req: NextRequest): Promise<NextResponse> {
+    const minDownloads = Number(req.nextUrl.searchParams.get("minDownloads") ?? 1_000_000);
+    const minShared = Number(req.nextUrl.searchParams.get("minShared") ?? 3);
+    return this.respond(() =>
+      dashboardService.getMaintainerClusters(
+        Number.isFinite(minDownloads) ? minDownloads : 1_000_000,
+        Number.isFinite(minShared) ? minShared : 3
+      )
+    );
+  }
+
   async health(): Promise<NextResponse> {
     return this.respond(async () => ({ up: await dashboardService.isHealthy() }));
   }

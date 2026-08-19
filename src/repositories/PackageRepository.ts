@@ -3,10 +3,14 @@ import type {
   Dependency,
   Dependent,
   PackageDetail,
+  PackageHealth,
   PackageSummary,
   PopularPackage,
   TreeAdvisory,
 } from "@/models";
+
+/** Severity labels worst-first — the display order for health breakdowns. */
+const SEVERITY_ORDER = ["CRITICAL", "HIGH", "MODERATE", "LOW", "UNKNOWN"];
 
 /** All Cypher touching Package nodes. Parameterized end-to-end — no string-built Cypher. */
 export class PackageRepository {
@@ -102,6 +106,43 @@ export class PackageRepository {
         distance: toNum(r.get("distance")),
         exampleChain: r.get("exampleChain") as string[],
       })
+    );
+  }
+
+  /**
+   * Health summary in one round-trip: how many packages this one pulls in
+   * directly versus transitively, and the advisories anywhere in that tree
+   * grouped by severity.
+   *
+   * The dependency counts are DISTINCT over a variable-length pattern — the
+   * same package reached by two different chains is still one dependency —
+   * which is exactly the deduplication a recursive CTE has to hand-roll.
+   */
+  async findHealth(name: string): Promise<PackageHealth> {
+    const rows = await this.db.read(
+      `MATCH (p:Package {name: $name})
+       OPTIONAL MATCH (p)-[:DEPENDS_ON_PKG]->(direct:Package)
+       WITH p, count(DISTINCT direct) AS directDependencies
+       OPTIONAL MATCH (p)-[:DEPENDS_ON_PKG*1..4]->(t:Package)
+       WITH p, directDependencies, count(DISTINCT t) AS transitiveDependencies
+       OPTIONAL MATCH (p)-[:DEPENDS_ON_PKG*0..4]->(dep:Package)<-[:AFFECTS]-(a:Advisory)
+       WITH directDependencies, transitiveDependencies,
+            a.severity AS severity, count(DISTINCT a) AS advisories
+       RETURN directDependencies, transitiveDependencies,
+              collect({severity: severity, count: advisories}) AS bySeverity`,
+      { name },
+      (r) => ({
+        directDependencies: toNum(r.get("directDependencies")),
+        transitiveDependencies: toNum(r.get("transitiveDependencies")),
+        bySeverity: (r.get("bySeverity") as Array<{ severity: string | null; count: unknown }>)
+          // a package with a clean tree yields one row with a null severity
+          .filter((s) => s.severity != null)
+          .map((s) => ({ severity: s.severity as string, count: toNum(s.count) }))
+          .sort((x, y) => SEVERITY_ORDER.indexOf(x.severity) - SEVERITY_ORDER.indexOf(y.severity)),
+      })
+    );
+    return (
+      rows[0] ?? { directDependencies: 0, transitiveDependencies: 0, bySeverity: [] }
     );
   }
 

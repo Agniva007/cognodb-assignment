@@ -35,9 +35,17 @@ interface ChokePoint {
   exposedTop: number;
 }
 
+interface MaintainerCluster {
+  maintainerA: string;
+  maintainerB: string;
+  sharedTrees: number;
+  examples: string[];
+}
+
 export default function Dashboard() {
   const state = useApi<DashboardData>("/api/stats");
   const choke = useApi<ChokePoint[]>("/api/choke-points");
+  const clusters = useApi<MaintainerCluster[]>("/api/maintainer-clusters");
 
   if (state.status === "error" && state.kind === "db") {
     return <DbErrorState message={state.message} />;
@@ -181,6 +189,57 @@ export default function Dashboard() {
           )
         ) : choke.status === "error" ? (
           <p className="px-4 py-6 text-sm text-[var(--muted)]">{choke.message}</p>
+        ) : (
+          <SkeletonRows rows={5} />
+        )}
+      </section>
+
+      <section className="card">
+        <div className="border-b border-[var(--hairline)] px-4 py-3">
+          <h2 className="text-sm font-semibold">Shared-maintainer clusters</h2>
+          <p className="mt-0.5 text-xs text-[var(--muted)]">
+            Maintainer pairs whose packages keep turning up in the same dependency trees. A
+            choke point is one point of failure; a cluster is a{" "}
+            <em>correlated</em> one — either account being compromised puts the same popular
+            packages in range.
+          </p>
+        </div>
+        {clusters.status === "ready" ? (
+          clusters.data.length === 0 ? (
+            <p className="px-4 py-6 text-sm text-[var(--muted)]">
+              No maintainer pairs co-occur often enough at the current thresholds.
+            </p>
+          ) : (
+            <ul className="divide-y divide-[var(--hairline)]">
+              {clusters.data.map((c) => (
+                <li
+                  key={`${c.maintainerA}|${c.maintainerB}`}
+                  className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-3"
+                >
+                  <span className="text-sm font-medium">
+                    {c.maintainerA} <span className="text-[var(--muted)]">+</span>{" "}
+                    {c.maintainerB}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-xs text-[var(--muted)]">
+                    both reach{" "}
+                    {c.examples.map((name, i) => (
+                      <span key={name}>
+                        {i > 0 && ", "}
+                        <PackageLink name={name} />
+                      </span>
+                    ))}
+                    {c.sharedTrees > c.examples.length && " and others"}
+                  </span>
+                  <span className="shrink-0 text-right text-xs text-[var(--ink-2)] tabular">
+                    {c.sharedTrees}
+                    <span className="block text-[var(--muted)]">shared trees</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )
+        ) : clusters.status === "error" ? (
+          <p className="px-4 py-6 text-sm text-[var(--muted)]">{clusters.message}</p>
         ) : (
           <SkeletonRows rows={5} />
         )}

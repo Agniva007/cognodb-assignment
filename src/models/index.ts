@@ -90,6 +90,27 @@ export interface ChokePoint {
   exposedTop: number;
 }
 
+/** Severity histogram + dependency counts for one package's tree. */
+export interface PackageHealth {
+  directDependencies: number;
+  transitiveDependencies: number;
+  /** advisories anywhere in the tree, grouped by severity (highest first) */
+  bySeverity: Array<{ severity: string; count: number }>;
+}
+
+/**
+ * Two maintainers whose packages keep turning up inside the same dependency
+ * trees — a correlated-risk pair rather than a single point of failure.
+ */
+export interface MaintainerCluster {
+  maintainerA: string;
+  maintainerB: string;
+  /** how many popular packages depend on work by both */
+  sharedTrees: number;
+  /** a few of those trees, for illustration */
+  examples: string[];
+}
+
 export interface GraphStats {
   packages: number;
   advisories: number;

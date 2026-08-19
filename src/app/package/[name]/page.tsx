@@ -37,6 +37,11 @@ interface PackageData {
     distance: number;
     exampleChain: string[];
   }>;
+  health: {
+    directDependencies: number;
+    transitiveDependencies: number;
+    bySeverity: Array<{ severity: string; count: number }>;
+  };
 }
 
 export default function PackagePage({ params }: { params: Promise<{ name: string }> }) {
@@ -68,7 +73,7 @@ export default function PackagePage({ params }: { params: Promise<{ name: string
     );
   }
 
-  const { pkg, deps, dependents, advisories, treeAdvisories } = state.data;
+  const { pkg, deps, dependents, advisories, treeAdvisories, health } = state.data;
   const transitive = treeAdvisories.filter((a) => a.distance > 0);
 
   return (
@@ -93,7 +98,11 @@ export default function PackagePage({ params }: { params: Promise<{ name: string
 
       <section className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatTile label="Weekly downloads" value={formatDownloads(pkg.weeklyDownloads)} />
-        <StatTile label="Direct dependencies" value={String(deps.length)} />
+        <StatTile
+          label="Dependencies"
+          value={String(health.directDependencies)}
+          hint={`${health.transitiveDependencies} transitive · ≤4 hops`}
+        />
         <StatTile label="Direct dependents" value={String(dependents.length)} hint="in this snapshot" />
         <StatTile
           label="Advisories in tree"
@@ -103,9 +112,21 @@ export default function PackagePage({ params }: { params: Promise<{ name: string
       </section>
 
       <section className="card">
-        <h2 className="border-b border-[var(--hairline)] px-4 py-3 text-sm font-semibold">
-          Vulnerabilities reaching this package (up to 4 hops)
-        </h2>
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--hairline)] px-4 py-3">
+          <h2 className="text-sm font-semibold">
+            Vulnerabilities reaching this package (up to 4 hops)
+          </h2>
+          {health.bySeverity.length > 0 && (
+            <ul className="flex flex-wrap items-center gap-2" aria-label="Advisories by severity">
+              {health.bySeverity.map((s) => (
+                <li key={s.severity} className="inline-flex items-center gap-1">
+                  <SeverityBadge severity={s.severity} />
+                  <span className="text-xs tabular text-[var(--ink-2)]">{s.count}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
         {treeAdvisories.length === 0 ? (
           <p className="px-4 py-6 text-sm text-[var(--muted)]">
             No known advisories anywhere in {pkg.name}’s dependency tree. 🎉

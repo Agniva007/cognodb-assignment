@@ -5,6 +5,7 @@ import type {
   Dependency,
   Dependent,
   PackageDetail,
+  PackageHealth,
   PackageSummary,
   TreeAdvisory,
 } from "@/models";
@@ -15,6 +16,7 @@ export interface PackageProfile {
   dependents: Dependent[];
   advisories: AdvisorySummary[];
   treeAdvisories: TreeAdvisory[];
+  health: PackageHealth;
 }
 
 /** Package use-cases: search and the aggregated package profile. */
@@ -32,12 +34,13 @@ export class PackageService {
   async getProfile(name: string): Promise<PackageProfile | null> {
     const pkg = await this.packages.findByName(name);
     if (!pkg) return null;
-    const [deps, dependents, advisories, treeAdvisories] = await Promise.all([
+    const [deps, dependents, advisories, treeAdvisories, health] = await Promise.all([
       this.packages.findDependencies(name),
       this.packages.findDependents(name),
       this.advisories.findByPackage(name),
       this.packages.findTreeAdvisories(name),
+      this.packages.findHealth(name),
     ]);
-    return { pkg, deps, dependents, advisories, treeAdvisories };
+    return { pkg, deps, dependents, advisories, treeAdvisories, health };
   }
 }

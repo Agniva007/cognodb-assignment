@@ -1,7 +1,13 @@
 import type { AdvisoryRepository } from "@/repositories/AdvisoryRepository";
 import type { GraphRepository } from "@/repositories/GraphRepository";
 import type { PackageRepository } from "@/repositories/PackageRepository";
-import type { ChokePoint, GraphStats, PopularPackage, RankedAdvisory } from "@/models";
+import type {
+  ChokePoint,
+  GraphStats,
+  MaintainerCluster,
+  PopularPackage,
+  RankedAdvisory,
+} from "@/models";
 
 export interface DashboardData {
   stats: GraphStats;
@@ -28,6 +34,10 @@ export class DashboardService {
 
   async getChokePoints(minDownloads: number, k: number): Promise<ChokePoint[]> {
     return this.graph.findChokePoints(minDownloads, k);
+  }
+
+  async getMaintainerClusters(minDownloads: number, minShared: number): Promise<MaintainerCluster[]> {
+    return this.graph.findMaintainerClusters(minDownloads, minShared);
   }
 
   async isHealthy(): Promise<boolean> {
