@@ -12,6 +12,8 @@ explore questions like:
 - *"How exactly does `next` end up pulling in `picocolors`?"*
 - *"Which single-maintainer packages quietly sit inside the dependency trees of the
   ecosystem's most-downloaded software?"*
+- *"Which pairs of maintainers keep showing up in the same dependency trees — so that one
+  compromised account would put the same popular packages at risk?"*
 
 > Built for the Wexa AI take-home assignment. **Live demo:** _link here_ · **Screen
 > recording:** _link here_
@@ -54,13 +56,19 @@ graph LR
 - `DEPENDS_ON_PKG` is a **materialized package-level shortcut** derived from each
   package's latest version at seed time, so multi-hop traversals stay simple and fast on
   CognoDB's free tier.
+- `Version` nodes cover each package's latest release **plus the historical releases an
+  advisory actually hits** — boundary versions first (first-vulnerable, last-before-fix),
+  capped per advisory and per package so the graph stays small.
 - `AFFECTS_VERSION` edges are computed in the seed script by evaluating OSV's
-  introduced/fixed version events against the stored versions with the `semver` library —
-  semver logic stays in code, the graph stores the conclusion.
+  introduced/fixed version events against those stored versions
+  ([`scripts/semver-match.ts`](scripts/semver-match.ts), shared by the fetch and seed
+  steps so they cannot disagree) — semver logic stays in code, the graph stores the
+  conclusion.
 
-**Snapshot size:** ~750 packages (64 popular seeds + their transitive dependency closure
-to depth 3), ~480 real advisories, ~5,000 relationships — sized for CognoDB's free c0
-tier (256 MB RAM / 1 GB disk).
+**Snapshot size:** 2,189 packages (137 popular seeds + their transitive dependency
+closure, which exhausts at depth 5), 3,388 versions, 956 advisories — **8,069 nodes and
+24,746 relationships** loaded, comfortably inside CognoDB's free c0 tier (256 MB RAM /
+1 GB disk).
 
 ## Setup
 
@@ -131,6 +139,42 @@ RETURN p.name, only.name AS maintainer, exposedTop
 ORDER BY exposedTop DESC
 ```
 
+**Shared-maintainer clusters** — the choke-point query's counterpart: pairs of
+maintainers whose packages keep co-occurring in the same dependency trees, so either
+account being compromised puts the same popular packages in range. The pairing is the
+graph doing the work — collect the maintainers reachable through each popular package's
+tree, then self-join that collection:
+
+```cypher
+MATCH (root:Package) WHERE root.weeklyDownloads > $minDownloads
+WITH root ORDER BY root.weeklyDownloads DESC LIMIT $roots
+MATCH (root)-[:DEPENDS_ON_PKG*0..3]->(p:Package)<-[:MAINTAINS]-(m:Maintainer)
+WITH root, collect(DISTINCT m.name) AS maintainers
+UNWIND maintainers AS a
+UNWIND maintainers AS b
+WITH a, b, root WHERE a < b
+WITH a, b, count(DISTINCT root) AS sharedTrees, collect(DISTINCT root.name)[0..4] AS examples
+WHERE sharedTrees >= $minShared
+RETURN a, b, sharedTrees, examples ORDER BY sharedTrees DESC
+```
+
+**Package health** — direct vs. transitive dependency counts and a severity histogram of
+every advisory in the tree, in one round-trip. Both counts are `DISTINCT` over a
+variable-length pattern (a package reached by two chains is still one dependency) — the
+deduplication a recursive CTE has to hand-roll:
+
+```cypher
+MATCH (p:Package {name: $name})
+OPTIONAL MATCH (p)-[:DEPENDS_ON_PKG]->(direct:Package)
+WITH p, count(DISTINCT direct) AS directDependencies
+OPTIONAL MATCH (p)-[:DEPENDS_ON_PKG*1..4]->(t:Package)
+WITH p, directDependencies, count(DISTINCT t) AS transitiveDependencies
+OPTIONAL MATCH (p)-[:DEPENDS_ON_PKG*0..4]->(dep:Package)<-[:AFFECTS]-(a:Advisory)
+WITH directDependencies, transitiveDependencies, a.severity AS severity, count(DISTINCT a) AS advisories
+RETURN directDependencies, transitiveDependencies,
+       collect({severity: severity, count: advisories}) AS bySeverity
+```
+
 **Transitive advisories for a package** — every vulnerability reaching a package within
 4 hops, with an example exposure chain per advisory (`0..4` so direct advisories are
 included too):
@@ -152,9 +196,9 @@ database. Any layer can be unit-tested against a fake of the layer beneath it.
 ```
 src/models/            domain types (Package, Advisory, BlastRadius, ChokePoint, …)
 src/repositories/      ALL Cypher lives here — parameterized, typed results
-  PackageRepository      search · profile · dependencies · tree advisories (multi-hop)
+  PackageRepository      search · profile · dependencies · tree advisories (multi-hop) · health
   AdvisoryRepository     advisory lookup · blast-radius traversal · graph edges
-  GraphRepository        stats · shortestPath · choke-point analysis
+  GraphRepository        stats · shortestPath · choke points · shared-maintainer clusters
 src/services/          use-cases composing repositories (concurrent aggregation)
   PackageService · AdvisoryService · DashboardService · PathService
 src/controllers/       HTTP layer — JSON envelope, 404/400 mapping, one 503 for DB-down
@@ -165,6 +209,7 @@ src/app/api/*          Next.js route files: one-line delegations to controllers
 src/app/*              UI — dashboard · package page · advisory blast-radius · path finder
 
 scripts/fetch-data.ts  npm registry + OSV.dev  →  data/dataset.json  (committed)
+scripts/semver-match.ts  shared "is this version affected?" logic (fetch + seed)
 scripts/seed.ts        dataset.json  →  CognoDB  (constraints, batched UNWIND/MERGE, idempotent)
 ```
 
