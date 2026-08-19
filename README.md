@@ -15,7 +15,9 @@ explore questions like:
 - *"Which pairs of maintainers keep showing up in the same dependency trees — so that one
   compromised account would put the same popular packages at risk?"*
 
-> Built for the Wexa AI take-home assignment. **Live demo:** _link here_ · **Screen
+> Built for the Wexa AI take-home assignment. **Live demo:** [cognodb-assignment-phi.vercel.app](https://cognodb-assignment-phi.vercel.app/)
+Resources
+ · **Screen
 > recording:** _link here_
 
 ## Why a graph database?
