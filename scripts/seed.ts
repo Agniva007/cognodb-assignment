@@ -10,7 +10,7 @@ import "dotenv/config";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import neo4j, { Driver } from "neo4j-driver";
-import semver from "semver";
+import { versionAffected } from "./semver-match";
 
 interface DatasetPackage {
   name: string;
@@ -21,6 +21,8 @@ interface DatasetPackage {
   publishedAt: string;
   dependencies: Record<string, string>;
   maintainers: string[];
+  /** historical versions an advisory hits; absent in pre-2026 snapshots */
+  vulnerableVersions?: Array<{ semver: string; publishedAt: string }>;
 }
 interface DatasetAdvisory {
   id: string;
@@ -44,28 +46,6 @@ function requireEnv(name: string): string {
     process.exit(1);
   }
   return v;
-}
-
-/** Is `version` inside the advisory's affected events (introduced/fixed pairs)? */
-function versionAffected(version: string, events: DatasetAdvisory["events"]): boolean {
-  const v = semver.coerce(version)?.version;
-  if (!v) return false;
-  let affected = false;
-  for (const e of events) {
-    if (e.introduced !== undefined) {
-      const intro = e.introduced === "0" ? "0.0.0" : semver.coerce(e.introduced)?.version;
-      if (intro && semver.gte(v, intro)) affected = true;
-    }
-    if (e.fixed !== undefined) {
-      const fixed = semver.coerce(e.fixed)?.version;
-      if (fixed && semver.gte(v, fixed)) affected = false;
-    }
-    if (e.lastAffected !== undefined) {
-      const last = semver.coerce(e.lastAffected)?.version;
-      if (last && semver.gt(v, last)) affected = false;
-    }
-  }
-  return affected;
 }
 
 async function runBatched(driver: Driver, cypher: string, rows: unknown[]) {
@@ -144,20 +124,33 @@ async function main() {
     }))
   );
 
-  console.log("loading Version nodes (latest per package)…");
+  // The latest release of every package, plus the historical versions that
+  // advisories actually hit — those are what AFFECTS_VERSION attaches to.
+  const versionRows = raw.packages.flatMap((p) => [
+    {
+      name: p.name,
+      key: `${p.name}@${p.latestVersion}`,
+      semver: p.latestVersion,
+      publishedAt: p.publishedAt,
+      isLatest: true,
+    },
+    ...(p.vulnerableVersions ?? []).map((v) => ({
+      name: p.name,
+      key: `${p.name}@${v.semver}`,
+      semver: v.semver,
+      publishedAt: v.publishedAt,
+      isLatest: false,
+    })),
+  ]);
+  console.log(`loading ${versionRows.length} Version nodes (latest + vulnerable history)…`);
   await runBatched(
     driver,
     `UNWIND $rows AS row
      MATCH (p:Package {name: row.name})
      MERGE (v:Version {key: row.key})
-     SET v.semver = row.semver, v.publishedAt = row.publishedAt, v.isLatest = true
+     SET v.semver = row.semver, v.publishedAt = row.publishedAt, v.isLatest = row.isLatest
      MERGE (p)-[:HAS_VERSION]->(v)`,
-    raw.packages.map((p) => ({
-      name: p.name,
-      key: `${p.name}@${p.latestVersion}`,
-      semver: p.latestVersion,
-      publishedAt: p.publishedAt,
-    }))
+    versionRows
   );
 
   console.log("loading Maintainer nodes + MAINTAINS…");
@@ -234,18 +227,22 @@ async function main() {
     }))
   );
 
-  // AFFECTS_VERSION: semver matching done here in JS, not in Cypher.
+  // AFFECTS_VERSION: semver matching done here in JS, not in Cypher. Every
+  // stored version of the affected package is tested, so an advisory links to
+  // each snapshotted release it actually covers.
   const pkgByName = new Map(raw.packages.map((p) => [p.name, p]));
-  const affectsVersionRows = advisoriesInGraph
-    .filter((a) => {
-      const pkg = pkgByName.get(a.packageName);
-      return pkg && versionAffected(pkg.latestVersion, a.events);
-    })
-    .map((a) => ({
-      advisoryId: a.id,
-      versionKey: `${a.packageName}@${pkgByName.get(a.packageName)!.latestVersion}`,
-    }));
-  console.log(`loading ${affectsVersionRows.length} AFFECTS_VERSION edges (latest version still vulnerable)…`);
+  const affectsVersionRows = advisoriesInGraph.flatMap((a) => {
+    const pkg = pkgByName.get(a.packageName);
+    if (!pkg) return [];
+    const candidates = [pkg.latestVersion, ...(pkg.vulnerableVersions ?? []).map((v) => v.semver)];
+    return candidates
+      .filter((version) => versionAffected(version, a.events))
+      .map((version) => ({
+        advisoryId: a.id,
+        versionKey: `${a.packageName}@${version}`,
+      }));
+  });
+  console.log(`loading ${affectsVersionRows.length} AFFECTS_VERSION edges…`);
   await runBatched(
     driver,
     `UNWIND $rows AS row

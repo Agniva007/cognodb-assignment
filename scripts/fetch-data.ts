@@ -7,10 +7,15 @@
  * The output is committed to the repo so `npm run seed` never needs network
  * access or API keys. Re-run this script only to refresh the snapshot.
  *
- * Usage: npx tsx scripts/fetch-data.ts [--cap 1200] [--depth 3]
+ * For every package that an advisory touches, the historical versions the
+ * advisory actually hits are snapshotted too (see scripts/semver-match.ts), so
+ * the Version / AFFECTS_VERSION half of the graph carries real data.
+ *
+ * Usage: npx tsx scripts/fetch-data.ts [--cap 2500] [--depth 5]
  */
 import { writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { selectVulnerableVersions, type AffectedEvent } from "./semver-match";
 
 const REGISTRY = "https://registry.npmjs.org";
 const DOWNLOADS = "https://api.npmjs.org/downloads/point/last-week";
@@ -21,8 +26,12 @@ function flag(name: string, fallback: number): number {
   const i = argv.indexOf(`--${name}`);
   return i >= 0 && argv[i + 1] ? Number(argv[i + 1]) : fallback;
 }
-const PACKAGE_CAP = flag("cap", 1200);
-const MAX_DEPTH = flag("depth", 3);
+const PACKAGE_CAP = flag("cap", 2500);
+const MAX_DEPTH = flag("depth", 5);
+/** Historical vulnerable versions snapshotted per advisory. */
+const VULN_VERSIONS_PER_ADVISORY = 3;
+/** Overall ceiling per package, so a much-patched package cannot dominate. */
+const VULN_VERSIONS_PER_PACKAGE = 12;
 const CONCURRENCY = 12;
 
 /** Well-known, heavily-depended-upon packages to root the BFS. */
@@ -37,6 +46,18 @@ const SEED_PACKAGES = [
   "cross-env", "rimraf", "glob", "minimatch", "semver", "fs-extra",
   "js-yaml", "xml2js", "cheerio", "puppeteer", "playwright", "sharp",
   "multer", "passport", "jsonwebtoken", "bcrypt", "nodemailer", "stripe",
+  "@babel/core", "rollup", "esbuild", "tailwindcss", "postcss", "autoprefixer",
+  "vitest", "cypress", "supertest", "nock", "sinon", "chai", "husky",
+  "lint-staged", "knex", "typeorm", "graphql", "apollo-server", "firebase",
+  "electron", "three", "d3", "chart.js", "immer", "redux", "@reduxjs/toolkit",
+  "zustand", "react-router-dom", "formik", "react-hook-form", "styled-components",
+  "@emotion/react", "framer-motion", "i18next", "marked", "highlight.js",
+  "dompurify", "sanitize-html", "tar", "archiver", "csv-parse", "papaparse",
+  "exceljs", "pdfkit", "qrcode", "jimp", "mime", "form-data", "undici",
+  "cookie-parser", "express-session", "ajv", "class-validator", "@nestjs/core",
+  "@angular/core", "svelte", "astro", "gatsby", "nuxt", "ts-node", "webpack-cli",
+  "babel-loader", "css-loader", "style-loader", "html-webpack-plugin",
+  "@aws-sdk/client-s3", "googleapis", "twilio", "openai", "langchain",
 ];
 
 // ---------------------------------------------------------------- types
@@ -51,6 +72,11 @@ interface PackageRecord {
   /** dependency name -> semver range, for the latest version */
   dependencies: Record<string, string>;
   maintainers: string[];
+  /**
+   * Historical versions an advisory actually hits, published-date included.
+   * Filled after the OSV pass; the latest version is never repeated here.
+   */
+  vulnerableVersions: Array<{ semver: string; publishedAt: string }>;
 }
 
 interface AdvisoryRecord {
@@ -109,7 +135,7 @@ async function pool<T, R>(items: T[], size: number, fn: (item: T) => Promise<R>)
 
 // ---------------------------------------------------------------- npm
 
-interface NpmLatestDoc {
+interface NpmVersionDoc {
   name: string;
   version: string;
   description?: string;
@@ -118,23 +144,53 @@ interface NpmLatestDoc {
   maintainers?: Array<{ name: string }>;
 }
 
-async function fetchPackage(name: string): Promise<PackageRecord | null> {
-  const doc = await fetchJson<NpmLatestDoc>(`${REGISTRY}/${encodeURIComponent(name).replace("%40", "@")}/latest`);
-  if (!doc) return null;
-  const timeDoc = await fetchJson<{ time?: Record<string, string> }>(
-    `${REGISTRY}/${encodeURIComponent(name).replace("%40", "@")}`,
-    { headers: { Accept: "application/vnd.npm.install-v1+json" } }
+interface NpmPackument {
+  name: string;
+  "dist-tags"?: { latest?: string };
+  versions?: Record<string, NpmVersionDoc>;
+  /** version -> ISO publish date; only the full (non-abbreviated) doc has it */
+  time?: Record<string, string>;
+}
+
+/** Everything one registry round-trip yields, including the full version list. */
+interface FetchedPackage {
+  record: PackageRecord;
+  /** every published version, for later vulnerable-version selection */
+  allVersions: string[];
+  publishTimes: Record<string, string>;
+}
+
+/**
+ * One request per package against the full packument.
+ *
+ * The abbreviated (`install-v1`) document is smaller but carries no `time`
+ * map, which left every Version node with an empty publishedAt. The full
+ * document answers metadata, dependencies, the complete version list, and
+ * publish dates together — fewer requests and strictly more data.
+ */
+async function fetchPackage(name: string): Promise<FetchedPackage | null> {
+  const doc = await fetchJson<NpmPackument>(
+    `${REGISTRY}/${encodeURIComponent(name).replace("%40", "@")}`
   );
-  const license = typeof doc.license === "string" ? doc.license : doc.license?.type ?? "";
+  const latest = doc?.["dist-tags"]?.latest;
+  const versionDoc = latest ? doc?.versions?.[latest] : undefined;
+  if (!doc || !latest || !versionDoc) return null;
+  const license =
+    typeof versionDoc.license === "string" ? versionDoc.license : versionDoc.license?.type ?? "";
   return {
-    name: doc.name,
-    description: doc.description ?? "",
-    license,
-    weeklyDownloads: 0, // filled later
-    latestVersion: doc.version,
-    publishedAt: timeDoc?.time?.[doc.version] ?? "",
-    dependencies: doc.dependencies ?? {},
-    maintainers: (doc.maintainers ?? []).map((m) => m.name),
+    record: {
+      name: doc.name,
+      description: versionDoc.description ?? "",
+      license,
+      weeklyDownloads: 0, // filled later
+      latestVersion: latest,
+      publishedAt: doc.time?.[latest] ?? "",
+      dependencies: versionDoc.dependencies ?? {},
+      maintainers: (versionDoc.maintainers ?? []).map((m) => m.name),
+      vulnerableVersions: [], // filled after the OSV pass
+    },
+    allVersions: Object.keys(doc.versions ?? {}),
+    publishTimes: doc.time ?? {},
   };
 }
 
@@ -249,6 +305,8 @@ async function main() {
   console.log(`BFS from ${SEED_PACKAGES.length} seeds, depth<=${MAX_DEPTH}, cap=${PACKAGE_CAP}`);
 
   const packages = new Map<string, PackageRecord>();
+  /** full version lists, kept out of the dataset — only the picks are written */
+  const versionMeta = new Map<string, { allVersions: string[]; publishTimes: Record<string, string> }>();
   let frontier = [...SEED_PACKAGES];
 
   for (let depth = 0; depth <= MAX_DEPTH && packages.size < PACKAGE_CAP; depth++) {
@@ -259,10 +317,14 @@ async function main() {
     console.log(`depth ${depth}: fetching ${batch.length} packages (have ${packages.size})`);
     const fetched = await pool(batch, CONCURRENCY, fetchPackage);
     const nextFrontier: string[] = [];
-    fetched.forEach((rec) => {
-      if (!rec) return;
-      packages.set(rec.name, rec);
-      nextFrontier.push(...Object.keys(rec.dependencies));
+    fetched.forEach((res) => {
+      if (!res) return;
+      packages.set(res.record.name, res.record);
+      versionMeta.set(res.record.name, {
+        allVersions: res.allVersions,
+        publishTimes: res.publishTimes,
+      });
+      nextFrontier.push(...Object.keys(res.record.dependencies));
     });
     frontier = nextFrontier;
   }
@@ -283,17 +345,50 @@ async function main() {
   }
   console.log(`found ${advisories.size} advisory-package records`);
 
+  // Snapshot the historical versions each advisory actually hits, so
+  // AFFECTS_VERSION describes real exposure instead of the rare case where a
+  // package's *latest* release is still unpatched.
+  console.log("selecting vulnerable versions per advisory…");
+  let picked = 0;
+  for (const advisory of advisories.values()) {
+    const meta = versionMeta.get(advisory.packageName);
+    const pkg = packages.get(advisory.packageName);
+    if (!meta || !pkg || pkg.vulnerableVersions.length >= VULN_VERSIONS_PER_PACKAGE) continue;
+    for (const version of selectVulnerableVersions(
+      meta.allVersions,
+      advisory.events as AffectedEvent[],
+      VULN_VERSIONS_PER_ADVISORY
+    )) {
+      if (version === pkg.latestVersion) continue; // already seeded as :Version
+      if (pkg.vulnerableVersions.some((v) => v.semver === version)) continue;
+      if (pkg.vulnerableVersions.length >= VULN_VERSIONS_PER_PACKAGE) break;
+      pkg.vulnerableVersions.push({
+        semver: version,
+        publishedAt: meta.publishTimes[version] ?? "",
+      });
+      picked++;
+    }
+  }
+  console.log(`snapshotted ${picked} vulnerable versions across the affected packages`);
+
   const outDir = join(process.cwd(), "data");
   mkdirSync(outDir, { recursive: true });
   const dataset = {
     generatedAt: new Date().toISOString(),
-    parameters: { seeds: SEED_PACKAGES.length, cap: PACKAGE_CAP, depth: MAX_DEPTH },
+    parameters: {
+      seeds: SEED_PACKAGES.length,
+      cap: PACKAGE_CAP,
+      depth: MAX_DEPTH,
+      vulnVersionsPerAdvisory: VULN_VERSIONS_PER_ADVISORY,
+    },
     packages: [...packages.values()],
     advisories: [...advisories.values()],
   };
   writeFileSync(join(outDir, "dataset.json"), JSON.stringify(dataset, null, 1));
+  const versionTotal = dataset.packages.reduce((n, p) => n + 1 + p.vulnerableVersions.length, 0);
   console.log(
-    `wrote data/dataset.json — ${dataset.packages.length} packages, ${dataset.advisories.length} advisories`
+    `wrote data/dataset.json — ${dataset.packages.length} packages, ` +
+      `${versionTotal} versions, ${dataset.advisories.length} advisories`
   );
 }
 
