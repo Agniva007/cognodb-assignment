@@ -1,0 +1,60 @@
+@import "tailwindcss";
+
+/* Single committed dark theme — a security console. Palette per the validated
+   reference instance: page/surface planes, ink roles, status colors for
+   severity (always paired with a text label, never color alone). */
+:root {
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --surface-2: #232322;
+  --ink: #ffffff;
+  --ink-2: #c3c2b7;
+  --muted: #898781;
+  --hairline: rgba(255, 255, 255, 0.1);
+  --grid: #2c2c2a;
+
+  --accent: #3987e5; /* categorical slot 1, dark step */
+
+  /* status palette — severity */
+  --critical: #d03b3b;
+  --serious: #ec835a; /* HIGH */
+  --warning: #fab219; /* MODERATE */
+  --good: #0ca30c;
+
+  /* sequential blue ramp for hop distance (dark-surface steps) */
+  --hop-1: #3987e5;
+  --hop-2: #6da7ec;
+  --hop-3: #9ec5f4;
+  --hop-4: #cde2fb;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--page);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes pulse-soft {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 0.9; }
+}
+.skeleton {
+  background: var(--surface-2);
+  border-radius: 6px;
+  animation: pulse-soft 1.4s ease-in-out infinite;
+}
